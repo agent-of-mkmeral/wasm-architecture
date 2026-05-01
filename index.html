@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Strands SDK: WASM Architecture Deep Dive</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg: #0f1117;
+  --surface: #1a1d27;
+  --surface2: #242836;
+  --border: #2d3348;
+  --text: #e4e7ef;
+  --text-dim: #8b92a8;
+  --accent: #6366f1;
+  --accent2: #8b5cf6;
+  --green: #10b981;
+  --red: #ef4444;
+  --orange: #f59e0b;
+  --blue: #3b82f6;
+  --cyan: #06b6d4;
+  --pink: #ec4899;
+}
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; overflow-x: hidden; }
+
+/* Navigation */
+nav { position: fixed; top: 0; left: 0; right: 0; z-index: 100; background: rgba(15,17,23,0.95); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; align-items: center; gap: 24px; }
+nav h1 { font-size: 16px; font-weight: 600; background: linear-gradient(135deg, var(--accent), var(--accent2)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; white-space: nowrap; }
+.nav-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+.nav-tab { padding: 6px 14px; border-radius: 6px; font-size: 13px; cursor: pointer; transition: all 0.2s; color: var(--text-dim); border: 1px solid transparent; }
+.nav-tab:hover { color: var(--text); background: var(--surface2); }
+.nav-tab.active { color: var(--text); background: var(--accent); border-color: var(--accent); }
+
+/* Main */
+main { padding-top: 70px; }
+.section { display: none; padding: 40px 24px; max-width: 1400px; margin: 0 auto; animation: fadeIn 0.3s ease; }
+.section.active { display: block; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+h2 { font-size: 28px; margin-bottom: 8px; font-weight: 700; }
+h3 { font-size: 20px; margin-bottom: 12px; font-weight: 600; color: var(--accent); }
+.subtitle { color: var(--text-dim); font-size: 15px; margin-bottom: 32px; }
+
+/* Cards */
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; margin-bottom: 20px; transition: all 0.2s; }
+.card:hover { border-color: var(--accent); transform: translateY(-2px); box-shadow: 0 8px 32px rgba(99,102,241,0.1); }
+.card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; margin-bottom: 32px; }
+
+/* Architecture Diagram */
+.arch-container { position: relative; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 32px; overflow: hidden; }
+.arch-row { display: flex; gap: 16px; margin-bottom: 16px; align-items: stretch; }
+.arch-box { flex: 1; padding: 16px 20px; border-radius: 10px; border: 2px solid; position: relative; cursor: pointer; transition: all 0.3s; }
+.arch-box:hover { transform: scale(1.02); box-shadow: 0 4px 20px rgba(0,0,0,0.3); }
+.arch-box .label { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; opacity: 0.7; margin-bottom: 4px; }
+.arch-box .title { font-size: 15px; font-weight: 600; }
+.arch-box .desc { font-size: 12px; opacity: 0.7; margin-top: 4px; }
+
+.host-zone { border-color: var(--green); background: rgba(16,185,129,0.05); }
+.wasm-zone { border-color: var(--accent); background: rgba(99,102,241,0.05); }
+.boundary-zone { border-color: var(--orange); background: rgba(245,158,11,0.05); }
+.wit-zone { border-color: var(--cyan); background: rgba(6,182,212,0.05); }
+
+/* Boundary Line */
+.boundary-line { position: relative; margin: 24px 0; padding: 12px 0; text-align: center; }
+.boundary-line::before { content: ''; position: absolute; left: 0; right: 0; top: 50%; height: 2px; background: repeating-linear-gradient(90deg, var(--orange), var(--orange) 8px, transparent 8px, transparent 16px); }
+.boundary-line span { position: relative; background: var(--surface); padding: 4px 16px; font-size: 12px; font-weight: 600; color: var(--orange); text-transform: uppercase; letter-spacing: 1px; }
+
+/* Flow Animation */
+.flow-container { position: relative; padding: 20px; }
+.flow-step { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; padding: 12px 16px; border-radius: 8px; background: var(--surface2); border-left: 3px solid var(--accent); opacity: 0; transform: translateX(-20px); transition: all 0.4s ease; }
+.flow-step.visible { opacity: 1; transform: translateX(0); }
+.flow-step .step-num { width: 28px; height: 28px; border-radius: 50%; background: var(--accent); display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex-shrink: 0; }
+.flow-step .step-text { font-size: 14px; }
+.flow-step .step-zone { font-size: 11px; padding: 2px 8px; border-radius: 4px; margin-left: auto; flex-shrink: 0; }
+.zone-host { background: rgba(16,185,129,0.2); color: var(--green); }
+.zone-wasm { background: rgba(99,102,241,0.2); color: var(--accent); }
+.zone-boundary { background: rgba(245,158,11,0.2); color: var(--orange); }
+
+/* Comparison */
+.compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+.compare-col { background: var(--surface); border-radius: 12px; padding: 24px; border: 1px solid var(--border); }
+.compare-col h4 { font-size: 16px; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+.compare-col.old h4 { color: var(--text-dim); }
+.compare-col.new h4 { color: var(--green); }
+.compare-item { padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; display: flex; align-items: center; gap: 8px; }
+.compare-item:last-child { border-bottom: none; }
+.compare-item .icon { font-size: 16px; }
+
+/* Interactive Boundary */
+.boundary-demo { display: grid; grid-template-columns: 1fr 80px 1fr; gap: 0; align-items: start; margin: 32px 0; }
+.boundary-col { padding: 16px; }
+.boundary-col h4 { font-size: 14px; margin-bottom: 12px; text-align: center; }
+.boundary-wall { background: linear-gradient(180deg, var(--orange), var(--cyan)); border-radius: 4px; min-height: 400px; display: flex; align-items: center; justify-content: center; writing-mode: vertical-rl; text-orientation: mixed; font-size: 12px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: var(--bg); padding: 16px 8px; }
+.data-item { padding: 10px 12px; margin-bottom: 8px; border-radius: 8px; font-size: 12px; cursor: pointer; transition: all 0.2s; border: 1px solid; }
+.data-item:hover { transform: translateX(4px); }
+.data-item.crosses { border-color: var(--green); background: rgba(16,185,129,0.08); }
+.data-item.blocked { border-color: var(--red); background: rgba(239,68,68,0.08); }
+.data-item .status { font-size: 14px; margin-right: 6px; }
+.data-item .item-title { font-weight: 600; }
+.data-item .item-desc { opacity: 0.7; margin-top: 2px; font-size: 11px; }
+
+/* Tooltip */
+.tooltip { display: none; position: fixed; background: var(--surface2); border: 1px solid var(--accent); border-radius: 8px; padding: 12px 16px; font-size: 13px; max-width: 320px; z-index: 1000; box-shadow: 0 8px 32px rgba(0,0,0,0.4); }
+.tooltip.show { display: block; }
+.tooltip h5 { color: var(--accent); margin-bottom: 4px; }
+
+/* Stats */
+.stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 32px; }
+.stat-box { text-align: center; padding: 20px; background: var(--surface); border-radius: 12px; border: 1px solid var(--border); }
+.stat-box .num { font-size: 32px; font-weight: 700; background: linear-gradient(135deg, var(--accent), var(--cyan)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.stat-box .label { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+
+/* Code */
+pre { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 16px; font-size: 13px; overflow-x: auto; font-family: 'JetBrains Mono', 'Fira Code', monospace; line-height: 1.6; }
+code { font-family: 'JetBrains Mono', 'Fira Code', monospace; }
+.keyword { color: var(--accent); }
+.string { color: var(--green); }
+.comment { color: var(--text-dim); }
+.type { color: var(--cyan); }
+
+/* Toggle */
+.toggle-group { display: flex; background: var(--surface); border-radius: 8px; padding: 4px; margin-bottom: 24px; border: 1px solid var(--border); width: fit-content; }
+.toggle-btn { padding: 8px 20px; border-radius: 6px; font-size: 13px; cursor: pointer; transition: all 0.2s; color: var(--text-dim); }
+.toggle-btn.active { background: var(--accent); color: white; }
+
+/* Responsive */
+@media (max-width: 768px) {
+  .compare-grid { grid-template-columns: 1fr; }
+  .boundary-demo { grid-template-columns: 1fr; }
+  .boundary-wall { writing-mode: horizontal-tb; min-height: auto; padding: 12px; }
+  .stats-row { grid-template-columns: repeat(2, 1fr); }
+  .arch-row { flex-direction: column; }
+  nav { padding: 8px 12px; gap: 12px; }
+  .nav-tabs { gap: 2px; }
+  .nav-tab { padding: 4px 10px; font-size: 12px; }
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <h1>⚡ Strands WASM</h1>
+  <div class="nav-tabs">
+    <div class="nav-tab active" data-tab="overview">Overview</div>
+    <div class="nav-tab" data-tab="architecture">Architecture</div>
+    <div class="nav-tab" data-tab="boundary">Data Boundary</div>
+    <div class="nav-tab" data-tab="tools">Tool Execution</div>
+    <div class="nav-tab" data-tab="models">Model Providers</div>
+    <div class="nav-tab" data-tab="comparison">Before vs After</div>
+    <div class="nav-tab" data-tab="impact">Impact</div>
+  </div>
+</nav>
+
+<main>
+
+<!-- OVERVIEW -->
+<div class="section active" id="overview">
+  <h2>Strands SDK: The WASM Shift</h2>
+  <p class="subtitle">From N independent SDKs to 1 WASM core + N thin bindings</p>
+  
+  <div class="stats-row">
+    <div class="stat-box"><div class="num">1</div><div class="label">WASM Core</div></div>
+    <div class="stat-box"><div class="num">N</div><div class="label">Language Bindings</div></div>
+    <div class="stat-box"><div class="num">~25</div><div class="label">Python Host Files</div></div>
+    <div class="stat-box"><div class="num">170+</div><div class="label">Old Python SDK Files</div></div>
+  </div>
+
+  <div class="card-grid">
+    <div class="card">
+      <h3>🏗️ The Problem</h3>
+      <p style="color:var(--text-dim); font-size:14px;">Multiple SDKs (Python, TypeScript) each implementing the full agent loop independently. Feature parity is hard. Bugs get fixed in one but not the other. Each SDK is 170+ files.</p>
+    </div>
+    <div class="card">
+      <h3>✨ The Solution</h3>
+      <p style="color:var(--text-dim); font-size:14px;">One core written in TypeScript, compiled to WASM via Component Model. Language-specific hosts provide thin bindings (~25 files). The WIT contract defines the boundary.</p>
+    </div>
+    <div class="card">
+      <h3>📦 What Ships</h3>
+      <p style="color:var(--text-dim); font-size:14px;">A <code>.wasm</code> binary artifact ships inside each language package (e.g., Python wheel). The host instantiates the WASM component and communicates via WIT imports/exports.</p>
+    </div>
+    <div class="card">
+      <h3>🔑 Key Insight</h3>
+      <p style="color:var(--text-dim); font-size:14px;">The boundary is <strong>data-only</strong>. Live objects (connections, callbacks, clients) cannot cross. Config and results (JSON/primitives) can. This splits responsibilities cleanly.</p>
+    </div>
+  </div>
+
+  <div class="arch-container">
+    <h3 style="margin-bottom:20px;">Layer Stack</h3>
+    <div class="arch-row">
+      <div class="arch-box host-zone"><div class="label">Layer 5 — Python Host</div><div class="title">strands-py/</div><div class="desc">User tools, MCP clients, multiagent, hooks receiver (~25 files)</div></div>
+    </div>
+    <div class="boundary-line"><span>⚡ WIT Boundary (agent.wit)</span></div>
+    <div class="arch-row">
+      <div class="arch-box wit-zone"><div class="label">Layer 4 — Bridge</div><div class="title">strands-wasm/</div><div class="desc">Maps WIT exports ↔ TS SDK classes (entry.ts)</div></div>
+    </div>
+    <div class="arch-row">
+      <div class="arch-box wasm-zone"><div class="label">Layer 3 — Core</div><div class="title">strands-ts/</div><div class="desc">Full TS SDK: agent loop, models, streaming, retry, vended tools</div></div>
+    </div>
+    <div class="arch-row">
+      <div class="arch-box wasm-zone" style="border-color: var(--pink);"><div class="label">Layer 2 — WASI</div><div class="title">WASI HTTP + Filesystem</div><div class="desc">Bedrock/OpenAI calls via WASI HTTP outbound; file ops via WASI FS</div></div>
+    </div>
+    <div class="arch-row">
+      <div class="arch-box" style="border-color: var(--text-dim); background: rgba(139,146,168,0.05);"><div class="label">Layer 1 — Runtime</div><div class="title">wasmtime / jco</div><div class="desc">WASM Component Model runtime (Python: wasmtime-py, Node: jco)</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ARCHITECTURE -->
+<div class="section" id="architecture">
+  <h2>Detailed Architecture</h2>
+  <p class="subtitle">Click any component to see details</p>
+
+  <div class="arch-container" style="min-height:500px;">
+    <!-- Python Host Side -->
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 24px;">
+      <div>
+        <h4 style="color:var(--green); margin-bottom:16px;">🐍 Python Host (runs natively)</h4>
+        <div class="arch-box host-zone" onclick="showDetail('user-tools')">
+          <div class="title">User-Defined Tools</div>
+          <div class="desc">@tool decorator, custom functions, MCP tool connections</div>
+        </div>
+        <div class="arch-box host-zone" onclick="showDetail('mcp')" style="margin-top:12px;">
+          <div class="title">MCP Clients</div>
+          <div class="desc">Live stdio/SSE connections to MCP servers</div>
+        </div>
+        <div class="arch-box host-zone" onclick="showDetail('multiagent')" style="margin-top:12px;">
+          <div class="title">Multiagent</div>
+          <div class="desc">Graph, Swarm, A2A orchestration</div>
+        </div>
+        <div class="arch-box host-zone" onclick="showDetail('hooks-host')" style="margin-top:12px;">
+          <div class="title">Python Hooks</div>
+          <div class="desc">Lifecycle callbacks, observability, guardrails</div>
+        </div>
+        <div class="arch-box host-zone" onclick="showDetail('structured')" style="margin-top:12px;">
+          <div class="title">Structured Output</div>
+          <div class="desc">Pydantic validation, output parsing</div>
+        </div>
+      </div>
+      
+      <div>
+        <h4 style="color:var(--accent); margin-bottom:16px;">⚡ WASM Guest (runs in sandbox)</h4>
+        <div class="arch-box wasm-zone" onclick="showDetail('event-loop')">
+          <div class="title">Agent Event Loop</div>
+          <div class="desc">Streaming, retry logic, tool dispatch orchestration</div>
+        </div>
+        <div class="arch-box wasm-zone" onclick="showDetail('models')" style="margin-top:12px;">
+          <div class="title">Model Providers</div>
+          <div class="desc">Bedrock, Anthropic, OpenAI, Gemini (via WASI HTTP)</div>
+        </div>
+        <div class="arch-box wasm-zone" onclick="showDetail('conv-mgmt')" style="margin-top:12px;">
+          <div class="title">Conversation Management</div>
+          <div class="desc">Sliding window, summarization, token tracking</div>
+        </div>
+        <div class="arch-box wasm-zone" onclick="showDetail('vended-tools')" style="margin-top:12px;">
+          <div class="title">Vended Tools</div>
+          <div class="desc">bash, file-editor, notebook, http-request</div>
+        </div>
+        <div class="arch-box wasm-zone" onclick="showDetail('sessions')" style="margin-top:12px;">
+          <div class="title">Session Persistence</div>
+          <div class="desc">S3/file storage via WASI HTTP</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="detail-panel" class="card" style="display:none; margin-top:20px; border-color: var(--accent);">
+    <h3 id="detail-title"></h3>
+    <p id="detail-content" style="color:var(--text-dim); font-size:14px; line-height:1.8;"></p>
+  </div>
+</div>
+
+<!-- DATA BOUNDARY -->
+<div class="section" id="boundary">
+  <h2>Data Boundary</h2>
+  <p class="subtitle">What crosses the WIT boundary and what doesn't</p>
+
+  <div class="boundary-demo">
+    <div class="boundary-col">
+      <h4 style="color:var(--green);">✅ Crosses Boundary</h4>
+      <div class="data-item crosses" onclick="showBoundaryDetail(this, 'Agent config (model ID, region, params)', 'Serialized as WIT records with string/number fields. Passed during agent initialization.')">
+        <div><span class="status">✅</span><span class="item-title">Agent Config</span></div>
+        <div class="item-desc">model_id, region, credentials, params</div>
+      </div>
+      <div class="data-item crosses" onclick="showBoundaryDetail(this, 'Tool Specifications', 'JSON Schema definitions of tools. Name, description, input_schema as JSON string.')">
+        <div><span class="status">✅</span><span class="item-title">Tool Specs (JSON Schema)</span></div>
+        <div class="item-desc">name, description, parameters schema</div>
+      </div>
+      <div class="data-item crosses" onclick="showBoundaryDetail(this, 'Tool Results', 'JSON-serialized results from tool execution. Strings, numbers, booleans, arrays.')">
+        <div><span class="status">✅</span><span class="item-title">Tool Results</span></div>
+        <div class="item-desc">JSON string responses from tool execution</div>
+      </div>
+      <div class="data-item crosses" onclick="showBoundaryDetail(this, 'Stream Events', 'Variant type in WIT. Text deltas, tool-use blocks, metadata events.')">
+        <div><span class="status">✅</span><span class="item-title">Stream Events</span></div>
+        <div class="item-desc">text deltas, tool_use, metadata</div>
+      </div>
+      <div class="data-item crosses" onclick="showBoundaryDetail(this, 'Messages (conversation history)', 'Serialized as JSON blob string. The full message array passes as a string.')">
+        <div><span class="status">✅</span><span class="item-title">Messages (JSON blob)</span></div>
+        <div class="item-desc">conversation history as serialized JSON</div>
+      </div>
+      <div class="data-item crosses" onclick="showBoundaryDetail(this, 'Credentials', 'AWS access keys, API keys, tokens — all strings that cross naturally.')">
+        <div><span class="status">✅</span><span class="item-title">Credentials (strings)</span></div>
+        <div class="item-desc">AWS keys, API keys, tokens</div>
+      </div>
+      <div class="data-item crosses" onclick="showBoundaryDetail(this, 'Lifecycle Events', 'Hook notifications (before/after model call, tool use) as WIT variant types.')">
+        <div><span class="status">✅</span><span class="item-title">Lifecycle Events</span></div>
+        <div class="item-desc">hook triggers (before_model, after_tool, etc)</div>
+      </div>
+      <div class="data-item crosses" onclick="showBoundaryDetail(this, 'Environment Variables', 'WASI inherits host process env vars. No special handling needed.')">
+        <div><span class="status">✅</span><span class="item-title">Environment Variables</span></div>
+        <div class="item-desc">inherited via WASI from host process</div>
+      </div>
+    </div>
+    
+    <div class="boundary-wall">WIT BOUNDARY</div>
+    
+    <div class="boundary-col">
+      <h4 style="color:var(--red);">❌ Cannot Cross</h4>
+      <div class="data-item blocked" onclick="showBoundaryDetail(this, 'MCP Client Connections', 'Live TCP/stdio connections to MCP servers. These are OS-level resources that cannot be serialized or transferred to WASM.')">
+        <div><span class="status">❌</span><span class="item-title">MCP Client Connections</span></div>
+        <div class="item-desc">live TCP/stdio to MCP servers</div>
+      </div>
+      <div class="data-item blocked" onclick="showBoundaryDetail(this, 'A2A Client Instances', 'Active gRPC/HTTP connections to other agents. Connection state, auth sessions, retry policies.')">
+        <div><span class="status">❌</span><span class="item-title">A2A Client Instances</span></div>
+        <div class="item-desc">active connections to other agents</div>
+      </div>
+      <div class="data-item blocked" onclick="showBoundaryDetail(this, 'Python Callbacks / Functions', 'Function pointers, closures, class methods. No way to represent executable code across the boundary.')">
+        <div><span class="status">❌</span><span class="item-title">Python Callbacks</span></div>
+        <div class="item-desc">function pointers, closures, lambdas</div>
+      </div>
+      <div class="data-item blocked" onclick="showBoundaryDetail(this, 'boto3 Sessions', 'AWS SDK session objects with credential providers, connection pools, custom HTTP clients.')">
+        <div><span class="status">❌</span><span class="item-title">boto3 Sessions</span></div>
+        <div class="item-desc">AWS SDK session with credential providers</div>
+      </div>
+      <div class="data-item blocked" onclick="showBoundaryDetail(this, 'Pre-configured HTTP Clients', 'Custom httpx/aiohttp clients with retry policies, proxies, interceptors, connection pools.')">
+        <div><span class="status">❌</span><span class="item-title">HTTP Client Instances</span></div>
+        <div class="item-desc">httpx/aiohttp with custom config</div>
+      </div>
+      <div class="data-item blocked" onclick="showBoundaryDetail(this, 'File Handles / Sockets', 'OS-level resources. File descriptors cannot be shared across the WASM boundary.')">
+        <div><span class="status">❌</span><span class="item-title">OS Resources</span></div>
+        <div class="item-desc">file handles, sockets, pipes</div>
+      </div>
+      <div class="data-item blocked" onclick="showBoundaryDetail(this, 'Model Class Instances', 'Instantiated model objects (OpenAIModel, BedrockModel). Only config data can cross.')">
+        <div><span class="status">❌</span><span class="item-title">Model Instances</span></div>
+        <div class="item-desc">instantiated model objects with state</div>
+      </div>
+      <div class="data-item blocked" onclick="showBoundaryDetail(this, 'Pydantic Models', 'Python-specific type validation objects. Schema can cross as JSON, but the validator cannot.')">
+        <div><span class="status">❌</span><span class="item-title">Pydantic Models</span></div>
+        <div class="item-desc">type validators (schema crosses, not object)</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="boundary-detail" class="card" style="display:none; border-color: var(--cyan);">
+    <h3 id="boundary-detail-title"></h3>
+    <p id="boundary-detail-content" style="color:var(--text-dim);font-size:14px;"></p>
+  </div>
+</div>
+
+<!-- TOOL EXECUTION -->
+<div class="section" id="tools">
+  <h2>Tool Execution Flow</h2>
+  <p class="subtitle">How vended tools vs user tools execute differently</p>
+
+  <div class="toggle-group">
+    <div class="toggle-btn active" onclick="showFlow('vended')">Vended Tool (bash)</div>
+    <div class="toggle-btn" onclick="showFlow('user')">User Tool (@tool)</div>
+    <div class="toggle-btn" onclick="showFlow('mcp')">MCP Tool</div>
+  </div>
+
+  <div id="flow-vended" class="flow-container">
+    <div class="flow-step"><div class="step-num">1</div><div class="step-text">Agent loop decides to call <code>bash</code> tool</div><div class="step-zone zone-wasm">WASM</div></div>
+    <div class="flow-step"><div class="step-num">2</div><div class="step-text">Tool dispatcher checks: is this a vended tool? <strong>Yes</strong></div><div class="step-zone zone-wasm">WASM</div></div>
+    <div class="flow-step"><div class="step-num">3</div><div class="step-text">Execute <code>bash</code> directly inside WASM guest (WASI process)</div><div class="step-zone zone-wasm">WASM</div></div>
+    <div class="flow-step"><div class="step-num">4</div><div class="step-text">Result returned to agent loop — <strong>never leaves WASM</strong></div><div class="step-zone zone-wasm">WASM</div></div>
+  </div>
+
+  <div id="flow-user" class="flow-container" style="display:none;">
+    <div class="flow-step"><div class="step-num">1</div><div class="step-text">Agent loop decides to call <code>my_tool</code></div><div class="step-zone zone-wasm">WASM</div></div>
+    <div class="flow-step"><div class="step-num">2</div><div class="step-text">Tool dispatcher checks: is this a vended tool? <strong>No</strong></div><div class="step-zone zone-wasm">WASM</div></div>
+    <div class="flow-step"><div class="step-num">3</div><div class="step-text">Calls WIT import: <code>tool-provider.call-tool(name, args_json)</code></div><div class="step-zone zone-boundary">BOUNDARY</div></div>
+    <div class="flow-step"><div class="step-num">4</div><div class="step-text">Python host receives call, finds <code>@tool</code> function</div><div class="step-zone zone-host">Python</div></div>
+    <div class="flow-step"><div class="step-num">5</div><div class="step-text">Executes Python function with deserialized args</div><div class="step-zone zone-host">Python</div></div>
+    <div class="flow-step"><div class="step-num">6</div><div class="step-text">Returns JSON result back through WIT boundary</div><div class="step-zone zone-boundary">BOUNDARY</div></div>
+    <div class="flow-step"><div class="step-num">7</div><div class="step-text">Agent loop receives result, continues reasoning</div><div class="step-zone zone-wasm">WASM</div></div>
+  </div>
+
+  <div id="flow-mcp" class="flow-container" style="display:none;">
+    <div class="flow-step"><div class="step-num">1</div><div class="step-text">Agent loop decides to call <code>mcp_server__read_file</code></div><div class="step-zone zone-wasm">WASM</div></div>
+    <div class="flow-step"><div class="step-num">2</div><div class="step-text">Not a vended tool → calls <code>tool-provider.call-tool()</code></div><div class="step-zone zone-boundary">BOUNDARY</div></div>
+    <div class="flow-step"><div class="step-num">3</div><div class="step-text">Python host routes to MCPClient instance</div><div class="step-zone zone-host">Python</div></div>
+    <div class="flow-step"><div class="step-num">4</div><div class="step-text">MCPClient sends request over <strong>live stdio/SSE connection</strong></div><div class="step-zone zone-host">Python</div></div>
+    <div class="flow-step"><div class="step-num">5</div><div class="step-text">MCP server processes request, returns result</div><div class="step-zone zone-host">Python</div></div>
+    <div class="flow-step"><div class="step-num">6</div><div class="step-text">Result serialized to JSON, returned through boundary</div><div class="step-zone zone-boundary">BOUNDARY</div></div>
+    <div class="flow-step"><div class="step-num">7</div><div class="step-text">Agent loop receives result, continues</div><div class="step-zone zone-wasm">WASM</div></div>
+  </div>
+</div>
+
+<!-- MODEL PROVIDERS -->
+<div class="section" id="models">
+  <h2>Model Provider Architecture</h2>
+  <p class="subtitle">How model calls work through WASM and what changes for customization</p>
+
+  <div class="card" style="margin-bottom:24px;">
+    <h3>Config Flow Through Boundary</h3>
+    <pre style="margin-top:12px;">
+<span class="comment">// Python Host</span>
+<span class="type">OpenAIModel</span>(
+  model_id=<span class="string">"gpt-4o"</span>,
+  api_key=<span class="string">"sk-..."</span>,
+  client_args={<span class="string">"base_url"</span>: <span class="string">"https://my-endpoint.com/v1"</span>}
+)
+        ↓  <span class="comment">serializes to WIT record</span>
+        
+<span class="comment">// WIT Boundary (openai-config record)</span>
+{
+  model_id: <span class="string">"gpt-4o"</span>,
+  api_key: <span class="string">"sk-..."</span>,
+  additional_config: <span class="string">'{"clientConfig":{"baseURL":"https://my-endpoint.com/v1"}}'</span>
+}
+        ↓  <span class="comment">deserialized in TS</span>
+
+<span class="comment">// WASM Guest (TypeScript)</span>
+<span class="keyword">new</span> <span class="type">OpenAI</span>({
+  apiKey: <span class="string">"sk-..."</span>,
+  ...clientConfig  <span class="comment">// ← baseURL lands here!</span>
+})</pre>
+  </div>
+
+  <div class="card-grid">
+    <div class="card" style="border-color:var(--green);">
+      <h3 style="color:var(--green);">✅ Works with WASM</h3>
+      <div class="compare-item"><span class="icon">✅</span> <code>client_args={"base_url": "..."}</code></div>
+      <div class="compare-item"><span class="icon">✅</span> <code>model_id</code> + <code>api_key</code> config</div>
+      <div class="compare-item"><span class="icon">✅</span> Environment variables (<code>OPENAI_BASE_URL</code>)</div>
+      <div class="compare-item"><span class="icon">✅</span> <code>timeout</code>, <code>maxRetries</code> via clientConfig</div>
+      <div class="compare-item"><span class="icon">✅</span> Any OpenAI-compatible endpoint via baseURL</div>
+    </div>
+    <div class="card" style="border-color:var(--red);">
+      <h3 style="color:var(--red);">❌ Breaks with WASM</h3>
+      <div class="compare-item"><span class="icon">❌</span> <code>client=AsyncOpenAI(...)</code> injection</div>
+      <div class="compare-item"><span class="icon">❌</span> Subclassing <code>OpenAIModel</code></div>
+      <div class="compare-item"><span class="icon">❌</span> Custom <code>Model</code> base class (MLX, etc)</div>
+      <div class="compare-item"><span class="icon">❌</span> Wrapper patterns (RetryBedrockModel)</div>
+      <div class="compare-item"><span class="icon">❌</span> Custom HTTP interceptors/proxies</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>🏭 Who's Affected</h3>
+    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px,1fr)); gap:16px; margin-top:16px;">
+      <div style="padding:12px; border-radius:8px; background:var(--surface2);">
+        <strong style="color:var(--red);">NVIDIA NeMo Agent Toolkit</strong>
+        <p style="font-size:12px; color:var(--text-dim); margin-top:4px;">Client injection + subclass override for NIM endpoints. Both patterns break.</p>
+      </div>
+      <div style="padding:12px; border-radius:8px; background:var(--surface2);">
+        <strong style="color:var(--green);">Tenstorrent</strong>
+        <p style="font-size:12px; color:var(--text-dim); margin-top:4px;">Uses client_args={"base_url": ...} — continues working perfectly.</p>
+      </div>
+      <div style="padding:12px; border-radius:8px; background:var(--surface2);">
+        <strong style="color:var(--red);">strands-mlx (community)</strong>
+        <p style="font-size:12px; color:var(--text-dim); margin-top:4px;">Custom Model subclass for Apple Silicon. Needs TS port or host-side model.</p>
+      </div>
+      <div style="padding:12px; border-radius:8px; background:var(--surface2);">
+        <strong style="color:var(--red);">AlloyModel (community)</strong>
+        <p style="font-size:12px; color:var(--text-dim); margin-top:4px;">Multi-provider routing. Complex pattern incompatible with single WASM model.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- COMPARISON -->
+<div class="section" id="comparison">
+  <h2>Before vs After</h2>
+  <p class="subtitle">Side-by-side comparison of Python-only SDK vs WASM architecture</p>
+
+  <div class="compare-grid">
+    <div class="compare-col old">
+      <h4>🐍 Python-Only SDK (Current)</h4>
+      <div class="compare-item"><span class="icon">📁</span> 170+ Python files</div>
+      <div class="compare-item"><span class="icon">🔄</span> Full event loop in Python</div>
+      <div class="compare-item"><span class="icon">🤖</span> 12+ model providers (native)</div>
+      <div class="compare-item"><span class="icon">🔧</span> All tools run in same process</div>
+      <div class="compare-item"><span class="icon">🧩</span> Subclassing & monkey-patching OK</div>
+      <div class="compare-item"><span class="icon">💉</span> Client injection supported</div>
+      <div class="compare-item"><span class="icon">📝</span> ConversationManager with .reduce_context()</div>
+      <div class="compare-item"><span class="icon">🔌</span> Direct boto3 session access</div>
+      <div class="compare-item"><span class="icon">🏃</span> Single runtime (CPython)</div>
+      <div class="compare-item"><span class="icon">⚡</span> No serialization overhead</div>
+      <div class="compare-item"><span class="icon">🐛</span> Bugs fixed per-SDK</div>
+      <div class="compare-item"><span class="icon">🔀</span> Feature parity is manual</div>
+    </div>
+    <div class="compare-col new">
+      <h4>⚡ WASM Architecture (New)</h4>
+      <div class="compare-item"><span class="icon">📁</span> ~25 Python host files + WASM binary</div>
+      <div class="compare-item"><span class="icon">🔄</span> Event loop in WASM (TS compiled)</div>
+      <div class="compare-item"><span class="icon">🤖</span> 4 model providers (Bedrock, Anthropic, OpenAI, Gemini)</div>
+      <div class="compare-item"><span class="icon">🔧</span> Vended tools in WASM, user tools in host</div>
+      <div class="compare-item"><span class="icon">🧩</span> No subclassing (sealed boundary)</div>
+      <div class="compare-item"><span class="icon">💉</span> Config-only (no client injection)</div>
+      <div class="compare-item"><span class="icon">📝</span> ConversationManager is config-only</div>
+      <div class="compare-item"><span class="icon">🔌</span> Credentials pass as strings</div>
+      <div class="compare-item"><span class="icon">🏃</span> Dual runtime (Python + WASM)</div>
+      <div class="compare-item"><span class="icon">⚡</span> WIT serialization at boundary</div>
+      <div class="compare-item"><span class="icon">🐛</span> Fix once, all languages benefit</div>
+      <div class="compare-item"><span class="icon">🔀</span> Feature parity is automatic</div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:24px; border-color:var(--cyan);">
+    <h3 style="color:var(--cyan);">Responsibility Split</h3>
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:20px; margin-top:16px;">
+      <div>
+        <h4 style="font-size:14px; color:var(--green); margin-bottom:8px;">Python Host Owns:</h4>
+        <ul style="font-size:13px; color:var(--text-dim); list-style:none;">
+          <li>• User-defined tools (@tool, MCP)</li>
+          <li>• MCP/A2A client lifecycle</li>
+          <li>• Multiagent orchestration</li>
+          <li>• Hook receivers (Python callbacks)</li>
+          <li>• Structured output (Pydantic)</li>
+          <li>• Plugin system</li>
+        </ul>
+      </div>
+      <div>
+        <h4 style="font-size:14px; color:var(--accent); margin-bottom:8px;">WASM Core Owns:</h4>
+        <ul style="font-size:13px; color:var(--text-dim); list-style:none;">
+          <li>• Agent event loop (stream, retry)</li>
+          <li>• Model HTTP calls (WASI)</li>
+          <li>• Vended tools (bash, editor)</li>
+          <li>• Conversation management</li>
+          <li>• Session persistence</li>
+          <li>• Hook emission (lifecycle bridge)</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- IMPACT -->
+<div class="section" id="impact">
+  <h2>Migration Impact</h2>
+  <p class="subtitle">What works, what breaks, and recommendations</p>
+
+  <div class="card-grid">
+    <div class="card" style="border-color:var(--green);">
+      <h3 style="color:var(--green);">✅ No Change Needed</h3>
+      <ul style="font-size:13px; color:var(--text-dim); list-style:none; line-height:2;">
+        <li>• Standard model config (model_id + api_key)</li>
+        <li>• Custom endpoints via base_url config</li>
+        <li>• Environment variable auth</li>
+        <li>• @tool decorated functions</li>
+        <li>• MCP tool connections</li>
+        <li>• Basic hooks (lifecycle events)</li>
+        <li>• Agent() constructor with config</li>
+      </ul>
+    </div>
+    <div class="card" style="border-color:var(--red);">
+      <h3 style="color:var(--red);">❌ Breaking Changes</h3>
+      <ul style="font-size:13px; color:var(--text-dim); list-style:none; line-height:2;">
+        <li>• Client injection (client=AsyncOpenAI(...))</li>
+        <li>• Model subclassing (NIMCompatibleOpenAIModel)</li>
+        <li>• Custom Model implementations (MLXModel)</li>
+        <li>• ConversationManager.reduce_context()</li>
+        <li>• Direct session state access</li>
+        <li>• Wrapper patterns (RetryBedrockModel)</li>
+        <li>• Community providers (12→4 built-in)</li>
+      </ul>
+    </div>
+    <div class="card" style="border-color:var(--orange);">
+      <h3 style="color:var(--orange);">🔮 Future Solutions</h3>
+      <ul style="font-size:13px; color:var(--text-dim); list-style:none; line-height:2;">
+        <li>• <strong>model-provider WIT import</strong> — host-side models</li>
+        <li>• TS ports of community providers</li>
+        <li>• additional_config escape hatch expansion</li>
+        <li>• Plugin-based model middleware</li>
+        <li>• Content formatter hooks in WIT</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="card" style="border-color:var(--accent);">
+    <h3>💡 Key Takeaway</h3>
+    <p style="color:var(--text-dim); font-size:15px; line-height:1.8; margin-top:8px;">
+      The WASM shift trades <strong>flexibility</strong> (subclassing, injection, monkey-patching) for <strong>consistency</strong> (fix once → all languages, automatic parity, single source of truth). 
+      The <code>additional_config</code> JSON passthrough covers most custom endpoint needs. 
+      For advanced patterns (custom model implementations, content formatters), a future <code>model-provider</code> WIT import would restore host-side extensibility without sacrificing the core benefits.
+    </p>
+  </div>
+</div>
+
+</main>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+// Navigation
+document.querySelectorAll('.nav-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById(tab.dataset.tab).classList.add('active');
+    // Trigger flow animations
+    setTimeout(() => animateFlowSteps(), 100);
+  });
+});
+
+// Detail panel for architecture
+const details = {
+  'user-tools': ['User-Defined Tools', 'Python @tool decorated functions stay in the host. When WASM needs to call them, it uses the tool-provider WIT import. The host deserializes args from JSON, executes the Python function, and returns JSON results. MCP tools also route through here since they need live connections.'],
+  'mcp': ['MCP Clients', 'MCP clients maintain live stdio/SSE/streamable-http connections to external servers. These connections are OS-level resources (file descriptors, sockets) that cannot cross the WASM boundary. The Python host manages the full MCP lifecycle and exposes tools to WASM via tool-provider.'],
+  'multiagent': ['Multiagent Orchestration', 'Graph, Swarm, and A2A patterns require managing multiple agent instances, routing decisions, and live connections between agents. This complexity stays in Python where it can leverage the full ecosystem (asyncio, connection pools, etc).'],
+  'hooks-host': ['Python Hooks (Receiver)', 'The WASM guest emits lifecycle events (before_model_call, after_tool_use, etc) through the lifecycle-bridge WIT export. Python hooks receive these as structured data and can execute arbitrary logic (logging, guardrails, telemetry). Hooks cannot modify WASM internal state directly.'],
+  'structured': ['Structured Output', 'Pydantic validation runs in Python. The output schema can cross as JSON Schema (string), but the Pydantic model object itself cannot. Validation happens after WASM returns the final response.'],
+  'event-loop': ['Agent Event Loop', 'The core reasoning loop lives inside WASM: receive model response → parse tool calls → dispatch tools → collect results → send back to model → repeat. Streaming, retry logic, and error handling all happen here. This is the biggest win — fix a loop bug once, all languages get it.'],
+  'models': ['Model Providers', 'Bedrock, Anthropic, OpenAI, and Gemini are built into the WASM guest. They make HTTP calls via WASI HTTP outbound (not through the host). Config (model_id, api_key, base_url) crosses as WIT records. The actual HTTP connection is created inside WASM.'],
+  'conv-mgmt': ['Conversation Management', 'Sliding window and summarization run inside WASM. Token counting, message truncation, and context summarization all happen in the guest. Python only sends config (max_tokens, strategy type). Unlike the old SDK, there is no .reduce_context() method accessible from Python.'],
+  'vended-tools': ['Vended Tools', 'bash, file-editor, notebook, http-request execute entirely inside WASM. They use WASI filesystem and WASI HTTP for I/O. They never cross the boundary, making them fast (no serialization overhead). New vended tools must be written in TS.'],
+  'sessions': ['Session Persistence', 'Session save/load uses WASI HTTP to talk to S3 or file storage. The session data (conversation history, state) stays inside WASM. Python passes the session config (bucket, key) during initialization but never touches the session data directly.']
+};
+
+function showDetail(key) {
+  const panel = document.getElementById('detail-panel');
+  const [title, content] = details[key];
+  document.getElementById('detail-title').textContent = title;
+  document.getElementById('detail-content').textContent = content;
+  panel.style.display = 'block';
+  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+// Boundary detail
+function showBoundaryDetail(el, title, content) {
+  const panel = document.getElementById('boundary-detail');
+  document.getElementById('boundary-detail-title').textContent = title;
+  document.getElementById('boundary-detail-content').textContent = content;
+  panel.style.display = 'block';
+}
+
+// Flow toggle
+function showFlow(type) {
+  document.querySelectorAll('.flow-container').forEach(f => f.style.display = 'none');
+  document.getElementById('flow-' + type).style.display = 'block';
+  document.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+  setTimeout(() => animateFlowSteps(), 50);
+}
+
+// Animate flow steps
+function animateFlowSteps() {
+  const activeFlow = document.querySelector('.flow-container[style*="block"], .flow-container:not([style*="none"])');
+  if (!activeFlow) return;
+  const steps = activeFlow.querySelectorAll('.flow-step');
+  steps.forEach((step, i) => {
+    step.classList.remove('visible');
+    setTimeout(() => step.classList.add('visible'), i * 150);
+  });
+}
+
+// Initial animation
+setTimeout(() => animateFlowSteps(), 300);
+</script>
+</body>
+</html>
